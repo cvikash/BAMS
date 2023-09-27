@@ -58,14 +58,11 @@ def EMD2_loss(predicted_histograms, target_histograms):
     
     for i in range(predicted_histograms.shape[1]):  # Loop through the features (N)
         for k in range(predicted_histograms.shape[2]):  # Loop through the bins (K)
-            # Calculate the cumulative distribution function (CDF) for predicted and target histograms
             predicted_cdf = torch.cumsum(predicted_histograms[i, 0:k], dim=-1)[k]
             target_cdf = torch.cumsum(target_histograms[i, 0:k], dim=-1)[k]
-            
-            # Calculate the squared difference between the CDFs
             squared_diff = (predicted_cdf - target_cdf) ** 2
             
-            # Sum the squared differences for each bin (K)
+  
             loss += squared_diff
     
     return loss
