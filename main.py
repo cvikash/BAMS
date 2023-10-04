@@ -5,25 +5,6 @@ import torch.nn.functional as F
 from torch import optim
 import helpers_py as pyhelpers
 
-# Load and preprocess the behavioral dataset
-def preprocess_data(dataset,server):
-    # Load the dataset
-    behavioral_keys = ['diff_heading', 'speed', 'saccade_rate']
-    fish_idx = [1,2,3,5,6,7,8,10,11,12,13,14,15,16,17,18,19]
-    data = []
-    for i in fish_idx:
-        file = "behavior_metrics_final_{}.h5".format(i)
-        dataset_path = pyhelpers.locate(dataset,server,file)
-        data_fish = pyhelpers.unpackh5(dataset_path)
-        # Extract the behavioral data
-        behavioral_data = np.array([data_fish[key] for key in behavioral_keys])
-        data.append(behavioral_data)
-    observations = torch.Tensor(data)  
-
-    return observations
-
-
-
 # residual block used in TCN module (see below)
 class _ResidualBlock(nn.Module):
     def __init__(
@@ -141,46 +122,55 @@ class _TCNModule(nn.Module):
 
 ## MLP for latent predictive loss
 class MLPLatentPrediction(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, seq_len):
         super(MLPLatentPrediction, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.input_dim = input_dim
-        
+        self.output_dim = output_dim
+        self.seq_len = seq_len
+
         # Define the layers of the MLP
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(input_dim*seq_len, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, output_dim*seq_len)
 
         
     def forward(self, zt):
+        zt = self.flatten(zt)
         hidden1 = F.relu(self.fc1(zt))
         hidden2 = F.relu(self.fc2(hidden1))
         hidden3 = F.relu(self.fc3(hidden2))
    
         output = self.fc4(hidden3)
-   
+        
+        output = output.view(output.shape[0], self.output_dim, self.seq_len)
         return output
 
 
 ## MLP for action prediction
 class MLPActionPredictor(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_bins):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_bins, seq_len):
         super(MLPActionPredictor, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.num_bins = num_bins
         self.input_dim = input_dim
-        
+        self.output_dim = output_dim
+        self.seq_len = seq_len
+
         # Define the layers of the MLP
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.flatten = nn.Flatten(start_dim=1, end_dim= -1)
+        self.fc1 = nn.Linear(input_dim*seq_len, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc5 = nn.Linear(hidden_dim, output_dim)
+        self.fc5 = nn.Linear(hidden_dim, output_dim*num_bins*seq_len)
         
     def forward(self, zt):
+        zt = self.flatten(zt)
         hidden1 = F.relu(self.fc1(zt))
         hidden2 = F.relu(self.fc2(hidden1))
         hidden3 = F.relu(self.fc3(hidden2))
@@ -189,64 +179,68 @@ class MLPActionPredictor(nn.Module):
         output = self.fc5(hidden4)
         
         # Reshape the output to match the shape of hitograms
-        output = output.view(self.output_dim, -1, self.num_bins)
+        output = output.view(output.shape[0], self.output_dim, self.seq_len, self.num_bins)
         
         # Apply softmax along the bins dimension to get normalized histograms
-        h_hat = F.softmax(output, dim=2)
+        h_hat = F.softmax(output, dim=-1)
         
         return h_hat
-
+    
 # make histograms from behavior to give targets to action predictor
-def make_histograms(observations, num_bins):
-    ob_hist = torch.empty((observations.shape[0], observations.shape[1], num_bins))
-    for k in range(observations.shape[1]):
-        for i in range(observations.shape[0]):
-            ob_hist[i,k,:] = torch.histc(observations[i,k], bins=num_bins)
+def make_histograms(observations, num_bins, predict_window):
+    ob_hist = torch.empty((observations.shape[0],observations.shape[1], observations.shape[2], num_bins))
+    for b in range(observations.shape[0]):
+        for k in range(observations.shape[2]):
+            for i in range(observations.shape[1]):
+                histograms = torch.histc(observations[b,i,k:k+predict_window], bins=num_bins)
+                histograms = histograms/torch.sum(histograms)
+                ob_hist[b,i,k,:] = histograms
     return ob_hist
 
 
 # EMD2 loss function for action predictor
 def EMD2_loss(predicted_histograms, target_histograms):
     loss = 0.0 
-    for t in range(predicted_histograms.shape[1]):  # Loop through the timepoints (T)
-        for i in range(predicted_histograms.shape[0]):  # Loop through the features (N)
-            for k in range(predicted_histograms.shape[2]):  # Loop through the bins (K)
-                # Calculate the cumulative distribution function (CDF) for predicted and target histograms
-                predicted_cdf = torch.cumsum(predicted_histograms[i,t, 0:k], dim=-1)[k]
-                target_cdf = torch.cumsum(target_histograms[i,t, 0:k], dim=-1)[k]
-                
-                # Calculate the squared difference between the CDFs
-                squared_diff = (predicted_cdf - target_cdf) ** 2
-                
-                # Sum the squared differences for each bin (K)
-                loss += squared_diff
+    for b in range(predicted_histograms.shape[0]):  # Loop through the batches (B)
+        for t in range(predicted_histograms.shape[2]):  # Loop through the timepoints (T)
+            for i in range(predicted_histograms.shape[1]):  # Loop through the features (N)
+                for k in range(predicted_histograms.shape[3]):  # Loop through the bins (K)
+                    # Calculate the cumulative distribution function (CDF) for predicted and target histograms
+                    predicted_cdf = torch.cumsum(predicted_histograms[b,i,t, 0:k], dim=-1)[k]
+                    target_cdf = torch.cumsum(target_histograms[b,i,t, 0:k], dim=-1)[k]
+                    
+                    # Calculate the squared difference between the CDFs
+                    squared_diff = (predicted_cdf - target_cdf) ** 2
+                    
+                    # Sum the squared differences for each bin (K)
+                    loss += squared_diff
     
     return loss
 
 def latent_predictive_loss_short(zt,zt_1,window_size):
-    
+  
     loss = 0.0
 
     # regress short term embeddings to neighboring embeddings in a window
-    for i in range(zt.shape[0]):
+    for b in range(zt.shape[0]):
+        for i in range(zt.shape[2]):
+            # MLP prediction
+            prediction = zt_1[b,:,i]
 
-        # MLP prediction
-        prediction = zt_1[:,i]
-
-        # bootstrap target in a small window around the prediction
-        if i<window_size:
-           idx = np.random.randint(0,i+window_size-1)
-           target = zt[:,0:i+window_size][idx]
-        elif i+window_size>=zt.shape[1]:
-           idx = np.random.randint(0,zt.shape[1]-i+window_size-1)
-           target = zt[:,i-window_size:zt.shape[1]-1][idx]
-        else:
-          idx = np.random.randint(0,2*window_size-1)
-          target = zt[:,i-window_size:i+window_size][idx]
+            # bootstrap target in a small window around the prediction
+            if i<window_size:
+                idx = np.random.randint(0,i+window_size-1)
+                target = zt[b, :,0:i+window_size][:,idx]
+            elif i+window_size>=zt.shape[2]:
+                idx = np.random.randint(0,zt.shape[2]-i+window_size-1)
+                target = zt[b, :,i-window_size:zt.shape[2]-1][:,idx]
+            else:
+                idx = np.random.randint(0,2*window_size-1)
+                target = zt[b, :,i-window_size:i+window_size][:,idx]
+            
+            ## add the loss for each timepoint
+            loss += torch.norm(prediction/torch.norm(prediction) - target/torch.norm(target))**2
         
-        ## add the loss for each timepoint
-        loss += torch.norm(prediction/torch.norm(prediction) - target/torch.norm(target))**2
-    
     return loss
 
 def latent_predictive_loss_long(zt,zt_1):
@@ -260,77 +254,6 @@ def latent_predictive_loss_long(zt,zt_1):
     return loss
 
 
-## short term embedding params
-input_size = 3
-kernel_size = 80
-num_filters = 64
-num_layers = 4
-dilation_base = 2
-weight_norm = True
-target_size = 32
-dropout = 0.05
-
-tcn_model_short = _TCNModule(input_size, kernel_size, num_filters, num_layers,  dilation_base, weight_norm,
-    target_size, dropout)
-
-## long term embedding params 
-input_size = 8
-kernel_size = 250
-num_filters = 64
-num_layers = 5
-dilation_base = 4
-weight_norm = True
-target_size = 32
-dropout = 0.05
-tcn_model_long = _TCNModule(input_size, kernel_size, num_filters, num_layers,  dilation_base, weight_norm,
-    target_size, dropout)
-
-# Load and preprocess data
-dataset = "20220708_120112"
-server = "roli-1"
-observations = preprocess_data(dataset,server)
-
-## ideally stack multiple fish together and batch them
-train_data = observations  ## have to make a data loader for this
-
-# Create short-term embeddings using TCNs
-short_embeddings = tcn_model_short(observations)  # Assuming observations have shape (num_features, batch_size, num_timesteps
-
-
-
-
-
-# training parameters for the networks
-num_epochs = 500   # random value at this point
-base_learning_rate_tcn = 0.001
-weight_decay = 4*1e-4
-
-## TCN model and its training optimizers
-optimizer_tcn_short = optim.Adam(tcn_model_short.parameters(), lr=base_learning_rate_tcn, weight_decay=weight_decay)
-optimizer_tcn_long = optim.Adam(tcn_model_long.parameters(), lr=base_learning_rate_tcn, weight_decay=weight_decay)
-
-## action predictor and its training optimizer
-base_learning_rate_predictor = 0.001*10
-
-input_dim = 64
-hidden_dim = 64
-output_dim = 8
-num_bins = 30
-action_prediction_model = MLPActionPredictor(input_dim, hidden_dim, output_dim, num_bins)
-optimizer_action_predictor = optim.Adam(action_prediction_model.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
-
-## latent predictor and its training optimizer
-latent_loss_hyperparameter = 0.01
-window_size = 30  ## random value at this point
-input_dim = 32
-hidden_dim = 64
-output_dim = input_dim
-
-latent_prediction_model_short = MLPLatentPrediction(input_dim, hidden_dim, output_dim)
-latent_prediction_model_long = MLPLatentPrediction(input_dim, hidden_dim, output_dim)
-
-optimizer_latent_predictor_short = optim.Adam(latent_prediction_model_short.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
-optimizer_latent_predictor_long = optim.Adam(latent_prediction_model_long.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
 
 def custom_lr_scheduler(optimizer, epoch):
     # custom logic for setting the learning rate as a function of the epoch
@@ -341,51 +264,3 @@ def custom_lr_scheduler(optimizer, epoch):
         param_group['lr'] = lr
 
 
-for epoch in range(num_epochs):
-    for batch in train_data:
-
-        # Zero the gradients for TCN optimizers
-        optimizer_tcn_short.zero_grad()
-        optimizer_tcn_long.zero_grad()
-        
-        # Zero the gradients for MLP optimizers
-        optimizer_action_predictor.zero_grad()
-        optimizer_latent_predictor_short.zero_grad()
-        optimizer_latent_predictor_long.zero_grad()
-
-        # Forward pass for TCN
-        short_embeddings = tcn_model_short(batch)
-        long_embeddings = tcn_model_long(batch)
-
-        embeddings = torch.cat((short_embeddings, long_embeddings), 0)
-
-        # Forward pass for action predictor
-        predicted_histograms = action_prediction_model(embeddings)
-
-        # Forward pass for latent predictor
-        predicted_short_embeddings = latent_prediction_model_short(short_embeddings)
-        predicted_long_embeddings = latent_prediction_model_long(long_embeddings)
-
-        # Compute the loss for action predictor
-        target_histograms = make_histograms(inputs, num_bins)
-        loss_action_predictor = EMD2_loss(predicted_histograms, target_histograms)
-
-        # Compute the loss for latent predictor
-        loss_latent_predictor_short = latent_predictive_loss_short(short_embeddings, predicted_short_embeddings, window_size)
-        loss_latent_predictor_long = latent_predictive_loss_long(long_embeddings, predicted_long_embeddings)
-
-
-
-        # Compute the total loss
-        loss = loss_action_predictor + latent_loss_hyperparameter * (loss_latent_predictor_short + loss_latent_predictor_long)
-        
-        # update the weights
-        loss.backward()
-        optimizer_tcn_short.step()
-        optimizer_tcn_long.step()
-        optimizer_action_predictor.step()
-        optimizer_latent_predictor_short.step()
-        optimizer_latent_predictor_long.step()
-
-        # print the loss
-        print(loss.item())
