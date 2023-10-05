@@ -50,15 +50,14 @@ dataset = light_cycle_dataset + constant_light_dataset + constant_dark_dataset
 
 ## load the data
 data_whole = preprocess_data(dataset)
-num_bins = 30
-predict_window = 2*60*3
-targets = main.make_histograms(data_whole, num_bins, predict_window)
-train_dataloader = DataLoader([[data_whole[i,:,:],targets[i,:,:]]for i in range(data_whole.shape[0])], batch_size=4, shuffle=True)
+predict_window = 2*20
+
+train_dataloader = DataLoader(data_whole, batch_size=4, shuffle=True)
 
 ## setup the logger
 current_time = datetime.now().replace(second=0, microsecond=0)
 
-logging.basicConfig(filename= 'training_' + current_time.isoformat() + '.log', level=logging.INFO)
+logging.basicConfig(filename= 'training_mse_version_' + current_time.isoformat() + '.log', level=logging.INFO)
 writer = SummaryWriter('logs')
 
 ## short term embedding params
@@ -88,7 +87,7 @@ tcn_model_long = main._TCNModule(input_size, kernel_size, num_filters, num_layer
 
 
 # training parameters for the networks
-num_epochs = 500   # random value at this point
+num_epochs = 15000   # random value at this point
 base_learning_rate_tcn = 0.001
 weight_decay = 4*1e-4
 
@@ -103,88 +102,60 @@ input_dim = 16
 hidden_dim = 16
 output_dim = 5
 
-seq_len = 15000
-action_prediction_model = main.MLPActionPredictor(input_dim, hidden_dim, output_dim, num_bins, seq_len)
-optimizer_action_predictor = optim.Adam(action_prediction_model.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
-
-## latent predictor and its training optimizer
-latent_loss_hyperparameter = 0.01
-window_size_short = 2*60*1  
-window_size_long = 2*60*10
-input_dim = 8
-hidden_dim = 16
-output_dim = input_dim
-
-
-
-latent_prediction_model_short = main.MLPLatentPrediction(input_dim, hidden_dim, output_dim, seq_len)
-latent_prediction_model_long = main.MLPLatentPrediction(input_dim, hidden_dim, output_dim, seq_len)
-
-optimizer_latent_predictor_short = optim.Adam(latent_prediction_model_short.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
-optimizer_latent_predictor_long = optim.Adam(latent_prediction_model_long.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
-
+seq_len = 500
+behav_prediction_model = main.MLPBehaviorPredictor(input_dim, hidden_dim, output_dim, predict_window)
+optimizer_beahav_predictor = optim.Adam(behav_prediction_model.parameters(), lr=base_learning_rate_predictor, weight_decay=weight_decay)
 
 
 for epoch in range(num_epochs):
     running_loss = 0.0
+
+    ## update the learning rate``
+    main.custom_lr_scheduler(optimizer_beahav_predictor, epoch)
+
     for (i,batch) in enumerate(train_dataloader):
+
+        batch_loss = 0.0
+        print(i)
+        for k in range(predict_window, batch.shape[2]-predict_window-1):
+
+    
+            # Zero the gradients for TCN optimizers
+            optimizer_tcn_short.zero_grad()
+            optimizer_tcn_long.zero_grad()
+            
+            # Zero the gradients for MLP optimizers
+            optimizer_beahav_predictor.zero_grad()
+
+            # Forward pass for TCN
+            short_embeddings = tcn_model_short(batch[:,:,0:k+1])
+            long_embeddings = tcn_model_long(batch[:,:,0:k+1])
+
+            embeddings = torch.cat((short_embeddings, long_embeddings), 1)
+
+            # Forward pass for behavior predictor
+            predicted_behav = behav_prediction_model(embeddings[:,:,k])
+            loss_action_predictor = main.MSE_loss(predicted_behav, batch[:,:,k+1:k+predict_window+1])
+            # Compute the loss for action predictor
+
+            # Compute the total loss
+            loss = loss_action_predictor
+            
+            # update the weights
+            loss.backward()
+            optimizer_tcn_short.step()
+            optimizer_tcn_long.step()
+            optimizer_beahav_predictor.step()
+
+            batch_loss += loss.item()
+            # print(loss.item())
         
-        train, target = batch
-        
-        ## update the learning rate``
-        main.custom_lr_scheduler(optimizer_latent_predictor_short, epoch)
-        main.custom_lr_scheduler(optimizer_latent_predictor_long, epoch)
-
-        # Zero the gradients for TCN optimizers
-        optimizer_tcn_short.zero_grad()
-        optimizer_tcn_long.zero_grad()
-        
-        # Zero the gradients for MLP optimizers
-        optimizer_action_predictor.zero_grad()
-        optimizer_latent_predictor_short.zero_grad()
-        optimizer_latent_predictor_long.zero_grad()
-
-        # Forward pass for TCN
-        short_embeddings = tcn_model_short(train)
-        long_embeddings = tcn_model_long(train)
-
-        embeddings = torch.cat((short_embeddings, long_embeddings), 1)
-
-        # Forward pass for action predictor
-        predicted_histograms = action_prediction_model(embeddings)
-
-        # Forward pass for latent predictor
-        predicted_short_embeddings = latent_prediction_model_short(short_embeddings)
-        predicted_long_embeddings = latent_prediction_model_long(long_embeddings)
-
-        # Compute the loss for action predictor
-
-        loss_action_predictor = main.EMD2_loss(predicted_histograms, target)
-
-        # Compute the loss for latent predictor
-        loss_latent_predictor_short = main.latent_predictive_loss_short(short_embeddings, predicted_short_embeddings, window_size_short)
-        loss_latent_predictor_long = main.latent_predictive_loss_short(long_embeddings, predicted_long_embeddings, window_size_long)
-
-
-
-        # Compute the total loss
-        loss = loss_action_predictor + latent_loss_hyperparameter * (loss_latent_predictor_short + loss_latent_predictor_long)
-        
-        # update the weights
-        loss.backward()
-        optimizer_tcn_short.step()
-        optimizer_tcn_long.step()
-        optimizer_action_predictor.step()
-        optimizer_latent_predictor_short.step()
-        optimizer_latent_predictor_long.step()
-
-        running_loss += loss.item()
-        
+        running_loss += batch_loss
          # Log loss to the console and to the log file
-        logging.info(f'Epoch [{epoch + 1}, Batch [{i + 1}]: Loss: {loss.item()}')
+        logging.info(f'Epoch [{epoch + 1}, Batch [{i + 1}]: Loss: {batch_loss}')
 
         # Log loss to TensorBoard
-        writer.add_scalar('Loss/train', loss.item(), epoch * len(train_dataloader) + i)
+        writer.add_scalar('Loss/train', batch_loss, epoch * len(train_dataloader) + i)
         
     # Log average loss for the epoch
     avg_loss = running_loss / len(train_dataloader)

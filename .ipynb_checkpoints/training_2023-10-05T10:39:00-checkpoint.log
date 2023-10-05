@@ -1,0 +1,5 @@
+INFO:root:Epoch [1, Batch [1]: Loss: 1409774.875
+INFO:root:Epoch [1, Batch [2]: Loss: 2647564.0
+INFO:root:Epoch [1, Batch [3]: Loss: 2546499.5
+INFO:root:Epoch [1, Batch [4]: Loss: 2308605.75
+INFO:root:Epoch [1, Batch [5]: Loss: 2171692.25

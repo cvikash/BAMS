@@ -185,6 +185,39 @@ class MLPActionPredictor(nn.Module):
         h_hat = F.softmax(output, dim=-1)
         
         return h_hat
+
+## MLP for behavior prediction
+## MLP for action prediction
+class MLPBehaviorPredictor(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, predict_window):
+        super(MLPBehaviorPredictor, self).__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.predict_window = predict_window
+
+        # Define the layers of the MLP
+        self.flatten = nn.Flatten(start_dim=1, end_dim= -1)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc5 = nn.Linear(hidden_dim, output_dim*predict_window)
+        
+    def forward(self, zt):
+        zt = self.flatten(zt)
+        hidden1 = F.relu(self.fc1(zt))
+        hidden2 = F.relu(self.fc2(hidden1))
+        hidden3 = F.relu(self.fc3(hidden2))
+        hidden4 = F.relu(self.fc4(hidden3))
+        
+        output = self.fc5(hidden4)
+        
+        # Reshape the output to match the shape of hitograms
+        output = output.view(output.shape[0], self.output_dim, self.predict_window)
+        
+        return output
     
 # make histograms from behavior to give targets to action predictor
 def make_histograms(observations, num_bins, predict_window):
@@ -192,7 +225,7 @@ def make_histograms(observations, num_bins, predict_window):
     for b in range(observations.shape[0]):
         for k in range(observations.shape[2]):
             for i in range(observations.shape[1]):
-                histograms = torch.histc(observations[b,i,k:k+predict_window], bins=num_bins)
+                histograms = torch.histc(observations[b,i,k:k+predict_window], bins=num_bins, min=torch.min(observations[b,i,:]), max=torch.max(observations[b,i,:]))
                 histograms = histograms/torch.sum(histograms)
                 ob_hist[b,i,k,:] = histograms
     return ob_hist
@@ -200,25 +233,25 @@ def make_histograms(observations, num_bins, predict_window):
 
 # EMD2 loss function for action predictor
 def EMD2_loss(predicted_histograms, target_histograms):
-    loss = 0.0 
-    for b in range(predicted_histograms.shape[0]):  # Loop through the batches (B)
-        for t in range(predicted_histograms.shape[2]):  # Loop through the timepoints (T)
-            for i in range(predicted_histograms.shape[1]):  # Loop through the features (N)
-                for k in range(predicted_histograms.shape[3]):  # Loop through the bins (K)
-                    # Calculate the cumulative distribution function (CDF) for predicted and target histograms
-                    predicted_cdf = torch.cumsum(predicted_histograms[b,i,t, 0:k], dim=-1)[k]
-                    target_cdf = torch.cumsum(target_histograms[b,i,t, 0:k], dim=-1)[k]
-                    
-                    # Calculate the squared difference between the CDFs
-                    squared_diff = (predicted_cdf - target_cdf) ** 2
-                    
-                    # Sum the squared differences for each bin (K)
-                    loss += squared_diff
+    # Calculate the cumulative distribution function (CDF) for predicted and target histograms
+    predicted_cdf = torch.cumsum(predicted_histograms, dim=-1)
+    target_cdf = torch.cumsum(target_histograms, dim=-1)
+    
+    # Calculate the squared difference between the CDFs
+    squared_diff = (predicted_cdf - target_cdf) ** 2
+    
+    # Sum the squared differences for each bin (K) and features (N)
+    loss = squared_diff.sum()
     
     return loss
 
+## MSE error for behavior feature prediction
+def MSE_loss(predicted_features, target_features):
+    loss = torch.nn.MSELoss(reduction='sum')
+    return loss(predicted_features, target_features)
+
+
 def latent_predictive_loss_short(zt,zt_1,window_size):
-  
     loss = 0.0
 
     # regress short term embeddings to neighboring embeddings in a window
@@ -226,7 +259,6 @@ def latent_predictive_loss_short(zt,zt_1,window_size):
         for i in range(zt.shape[2]):
             # MLP prediction
             prediction = zt_1[b,:,i]
-
             # bootstrap target in a small window around the prediction
             if i<window_size:
                 idx = np.random.randint(0,i+window_size-1)
@@ -240,7 +272,6 @@ def latent_predictive_loss_short(zt,zt_1,window_size):
             
             ## add the loss for each timepoint
             loss += torch.norm(prediction/torch.norm(prediction) - target/torch.norm(target))**2
-        
     return loss
 
 def latent_predictive_loss_long(zt,zt_1):
@@ -257,10 +288,10 @@ def latent_predictive_loss_long(zt,zt_1):
 
 def custom_lr_scheduler(optimizer, epoch):
     # custom logic for setting the learning rate as a function of the epoch
-    if epoch > 100:
+    if epoch == 100:
         lr = 0.0001
+        for param_group in optimizer.param_groups:
+          param_group['lr'] = lr
     
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
 
 

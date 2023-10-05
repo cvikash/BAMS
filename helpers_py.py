@@ -3,7 +3,7 @@ import h5py
 import glob
 import socket
 import pickle 
-import pymongo as pym
+# import pymongo as pym
 import pandas as pd
 import scipy
 import matplotlib
