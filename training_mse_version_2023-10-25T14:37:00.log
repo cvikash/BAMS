@@ -1,0 +1,25 @@
+INFO:root:Epoch [1, Batch [1]: Loss: 6440.347428917885
+INFO:root:Epoch [1, Batch [2]: Loss: 4961.405110836029
+INFO:root:Epoch [1, Batch [3]: Loss: 4456.998074412346
+INFO:root:Epoch [1, Batch [4]: Loss: 4321.839320242405
+INFO:root:Epoch [1, Batch [5]: Loss: 4238.391871094704
+INFO:root:Epoch [1, Batch [6]: Loss: 5002.669352412224
+INFO:root:Epoch [1, Batch [7]: Loss: 4047.610227584839
+INFO:root:Epoch [1, Batch [8]: Loss: 4562.82099199295
+INFO:root:Epoch [1, Batch [9]: Loss: 4204.217611640692
+INFO:root:Epoch [1, Batch [10]: Loss: 4130.398562043905
+INFO:root:Epoch [1, Batch [11]: Loss: 4333.726888328791
+INFO:root:Epoch [1, Batch [12]: Loss: 4989.3107216358185
+INFO:root:Epoch [1, Batch [13]: Loss: 4811.839625597
+INFO:root:Epoch [1, Batch [14]: Loss: 4597.503741800785
+INFO:root:Epoch [1, Batch [15]: Loss: 4479.871422171593
+INFO:root:Epoch [1, Batch [16]: Loss: 4504.36566722393
+INFO:root:Epoch [1, Batch [17]: Loss: 4019.4151027202606
+INFO:root:Epoch [1, Batch [18]: Loss: 4083.2901415228844
+INFO:root:Epoch [1, Batch [19]: Loss: 4078.588230371475
+INFO:root:Epoch [1, Batch [20]: Loss: 4028.890863031149
+INFO:root:Epoch [1, Batch [21]: Loss: 4150.684172555804
+INFO:root:Epoch [1, Batch [22]: Loss: 4041.3673894405365
+INFO:root:Epoch [1, Batch [23]: Loss: 2041.2608518265188
+INFO:root:Epoch [1] Average Loss: 4370.731016061066
+INFO:root:Epoch [2, Batch [1]: Loss: 4023.321102142334
